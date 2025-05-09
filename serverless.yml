@@ -1,0 +1,161 @@
+service: appointment-api
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: nodejs18.x
+  region: us-east-1
+  stage: dev
+  environment:
+    DYNAMODB_TABLE: appointmentsTable
+    
+  iam:
+    role:
+      statements:
+        - Effect: Allow
+          Action:
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Query
+            - sns:Publish
+            - sqs:SendMessage
+            - sqs:ReceiveMessage
+            - sqs:DeleteMessage
+            - events:PutEvents
+          Resource: "*"
+
+functions:
+  appointment:
+    handler: src/handler.appointmentHandler
+    events:
+      - http:
+          path: appointments
+          method: post
+      - http:
+          path: appointments/{insuredId}
+          method: get
+
+  getAllAppointments:
+    handler: src/interfaces/api/getAllAppointmentsHandler.handler
+    events:
+      - http:
+          path: appointments
+          method: get
+
+  appointmentProcessorPE:
+    handler: src/interfaces/api/appointmentProcessorPE.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [ SqsQueuePE, Arn ]
+
+  appointmentProcessorCL:
+    handler: src/interfaces/api/appointmentProcessorCL.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [ SqsQueueCL, Arn ]
+
+  confirmationHandler:
+    handler: src/interfaces/api/confirmationHandler.handler
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt: [ SqsQueueConfirmation, Arn ]
+
+  simpleGetEndpoint:
+    handler: src/interfaces/api/simpleGetEndpoint.handler
+    events:
+      - http:
+          path: simple-endpoint
+          method: get
+
+resources:
+  Resources:
+    AppointmentsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: appointmentsTable
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: insuredId
+            AttributeType: S
+          - AttributeName: appointmentId
+            AttributeType: S
+        KeySchema:
+          - AttributeName: insuredId
+            KeyType: HASH
+          - AttributeName: appointmentId
+            KeyType: RANGE
+
+    SnsTopic:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: appointmentTopic
+
+    SnsSubscriptionPE:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn:
+          Ref: SnsTopic
+        Protocol: sqs
+        Endpoint:
+          Fn::GetAtt: [ SqsQueuePE, Arn ]
+        FilterPolicy:
+          countryISO:
+            - PE
+
+    SnsSubscriptionCL:
+      Type: AWS::SNS::Subscription
+      Properties:
+        TopicArn:
+          Ref: SnsTopic
+        Protocol: sqs
+        Endpoint:
+          Fn::GetAtt: [ SqsQueueCL, Arn ]
+        FilterPolicy:
+          countryISO:
+            - CL
+
+    SqsQueuePE:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointmentQueuePE
+
+    SqsQueueCL:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointmentQueueCL
+
+    SqsQueueConfirmation:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: appointmentConfirmationQueue
+
+    EventBridgeRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: appointmentConfirmationRule
+        EventPattern:
+          source:
+            - "appointment.processor"
+          detail-type:
+            - "AppointmentConfirmed"
+        Targets:
+          - Arn:
+              Fn::GetAtt: [ SqsQueueConfirmation, Arn ]
+            Id: "SendToSQS"
+
+plugins:
+  - serverless-offline
+  - serverless-esbuild
+
+custom:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    exclude: ['aws-sdk']
+    target: 'node18'
+    platform: 'node'
+    concurrency: 10
